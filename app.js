@@ -8,7 +8,7 @@ let role = null;            // 'host' | 'client' | 'local'
 let H = null;               // حالة المضيف
 let peer = null, conn = null;
 let V = null, LB = null, mySeat = 0, code = '';
-let sel = new Set(), pend = [], sortMode = 'suit', botTimer = null, screenName = 'home';
+let sel = new Set(), pend = [], order = [], orderRound = -1, botTimer = null, screenName = 'home';
 let cfg = { n: 2, teams: false, target: 200 };
 let myName = ls.get('rami_name', '');
 
@@ -25,10 +25,19 @@ function cardHtml(c, o) {
   const suit = c.j ? '★' : su;
   return '<div class="' + cls + '" data-id="' + c.id + '">' + rk + '<i>' + suit + '</i></div>';
 }
-function sortHand(h) {
-  const a = h.slice();
-  const key = (c) => (c.r === 0 ? 999 : sortMode === 'suit' ? c.s * 20 + c.r : c.r * 5 + c.s);
-  return a.sort((x, y) => key(x) - key(y));
+function sortBy(h, mode) {
+  const key = (c) => (c.r === 0 ? 999 : mode === 'suit' ? c.s * 20 + c.r : c.r * 5 + c.s);
+  return h.slice().sort((x, y) => key(x) - key(y));
+}
+/* ترتيب اليد: الترتيب ديال اللاعب كيبقى، والكارطات الجداد كتزاد فالآخر */
+function orderedHand(cards) {
+  if (orderRound !== V.round) { order = []; orderRound = V.round; }
+  const byId = new Map(cards.map((c) => [c.id, c]));
+  if (!order.length) order = sortBy(cards, 'suit').map((c) => c.id);
+  const kept = order.filter((i) => byId.has(i));
+  const fresh = cards.filter((c) => !kept.includes(c.id)).map((c) => c.id);
+  order = kept.concat(fresh);
+  return order.map((i) => byId.get(i));
 }
 
 /* ---------- الشبكة ---------- */
@@ -269,8 +278,8 @@ function renderGame() {
     h += '<div id="acts"><button id="bGrp" class="sec">➕ جمّع</button><button id="bAuto" class="sec">✨ اقتراح</button>' +
       '<button id="bLay" ' + (pend.length ? '' : 'disabled') + '>⬇ نزّل</button><button id="bDis" class="red">🗑 رمي</button></div>';
   } else if (v.phase === 'draw' || v.phase === 'play') h += '<div class="hint">الدور ديال ' + esc(v.seats[v.turn].name) + '…</div>';
-  h += '<div id="hand">' + sortHand(v.hand.filter((c) => !pendIds.has(c.id))).map((c) => cardHtml(c, { sel: sel.has(c.id), took: v.took === c.id })).join('') + '</div>';
-  h += '<div style="text-align:center;margin-top:4px"><button class="sec" id="bSort" style="padding:3px 10px;font-size:12px">رتب: ' + (sortMode === 'suit' ? 'بالنوع' : 'بالرقم') + '</button></div></div>';
+  h += '<div id="hand">' + orderedHand(v.hand).filter((c) => !pendIds.has(c.id)).map((c) => cardHtml(c, { sel: sel.has(c.id), took: v.took === c.id })).join('') + '</div>';
+  h += '<div style="text-align:center;margin-top:4px"><span style="font-size:12px;opacity:.8">جرّ الكارطة باش تبدل بلاصتها &nbsp;</span><button class="sec" id="bSortS" style="padding:3px 10px;font-size:12px">رتب بالنوع</button> <button class="sec" id="bSortR" style="padding:3px 10px;font-size:12px">رتب بالرقم</button></div></div>';
   if (v.phase === 'roundEnd' || v.phase === 'gameEnd') h += resultHtml();
   app.innerHTML = h;
   bindGame(myTurn);
@@ -295,12 +304,39 @@ function bindGame(myTurn) {
   const v = V;
   $('#bOut').onclick = () => { if (confirm('تخرج من اللعبة؟')) leave(); };
   const nx = $('#bNext'); if (nx) nx.onclick = () => { sel.clear(); pend = []; doAct({ type: 'next' }); };
-  $('#bSort').onclick = () => { sortMode = sortMode === 'suit' ? 'rank' : 'suit'; renderGame(); };
+  $('#bSortS').onclick = () => { order = sortBy(v.hand, 'suit').map((c) => c.id); renderGame(); };
+  $('#bSortR').onclick = () => { order = sortBy(v.hand, 'rank').map((c) => c.id); renderGame(); };
   $('#pStock').onclick = () => { if (myTurn && v.phase === 'draw') doAct({ type: 'draw', from: 'stock' }); };
   $('#pDisc').onclick = () => { if (myTurn && v.phase === 'draw') doAct({ type: 'draw', from: 'discard' }); };
-  $('#hand').onclick = (e) => {
-    const el = e.target.closest('.card'); if (!el) return; const id = +el.dataset.id;
-    if (sel.has(id)) sel.delete(id); else sel.add(id); renderGame();
+  const handEl = $('#hand');
+  handEl.onpointerdown = (e) => {
+    const el = e.target.closest('.card'); if (!el) return;
+    const id = +el.dataset.id, sx = e.clientX, sy = e.clientY;
+    let drag = false, ghost = null;
+    const move = (ev) => {
+      if (!drag) {
+        if (Math.hypot(ev.clientX - sx, ev.clientY - sy) < 8) return;
+        drag = true; ghost = el.cloneNode(true);
+        ghost.style.cssText = 'position:fixed;z-index:20;pointer-events:none;opacity:.92;transform:scale(1.15);margin:0';
+        document.body.appendChild(ghost); el.style.opacity = '.3';
+      }
+      ghost.style.left = (ev.clientX - el.offsetWidth / 2) + 'px'; ghost.style.top = (ev.clientY - el.offsetHeight / 2) + 'px';
+      const t = document.elementFromPoint(ev.clientX, ev.clientY), tc = t && t.closest && t.closest('#hand .card');
+      if (tc && tc !== el) {
+        const r = tc.getBoundingClientRect(), before = ev.clientX > r.left + r.width / 2; // الصفحة RTL
+        handEl.insertBefore(el, before ? tc : tc.nextSibling);
+      }
+    };
+    const end = () => {
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end); window.removeEventListener('pointercancel', end);
+      if (ghost) ghost.remove();
+      if (drag) {
+        const vis = [...handEl.querySelectorAll('.card')].map((c) => +c.dataset.id);
+        order = vis.concat(order.filter((i) => !vis.includes(i)));
+      } else if (sel.has(id)) sel.delete(id); else sel.add(id);
+      renderGame();
+    };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', end); window.addEventListener('pointercancel', end);
   };
   app.querySelectorAll('[data-pg]').forEach((el) => (el.onclick = () => { pend.splice(+el.dataset.pg, 1); renderGame(); }));
   app.querySelectorAll('.meld[data-m]').forEach((el) => (el.onclick = () => {
